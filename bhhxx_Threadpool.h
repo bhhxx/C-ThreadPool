@@ -4,6 +4,8 @@
 #include <vector>
 #include <thread>
 #include <condition_variable>
+#include <future>
+#include <memory>
 // 线程安全队列
 // 主要实现的功能：进队列，出队列，并保证线程安全，提供生产者消费者模型，条件变量阻塞
 template <typename value_type>
@@ -55,7 +57,7 @@ private:
     ThreadSafeQueue<std::function<void()>> tasks_; // 任务队列
     std::vector<std::thread> workers_; // 工作线程
 private:
-    // 消费者
+    // 取任务，没取出则通过 ThreadSafeQueue 提供的 wait 阻塞
     void worker_loop() {
         while (true) {
             // 取出任务
@@ -76,6 +78,11 @@ public:
             workers_[i] = std::thread(&ThreadPool::worker_loop, this); // 传入 worker_loop 函数
         }
     }
+    // 禁止拷贝和赋值
+    ThreadPool(const ThreadPool&) = delete;
+    ThreadPool& operator=(const ThreadPool&) = delete;
+    ThreadPool(ThreadPool&&) = delete;
+    ThreadPool& operator=(ThreadPool&&) = delete;
     // 析构函数 需要等待多个线程执行完
     ~ThreadPool() {
         tasks_.stop();
@@ -83,9 +90,18 @@ public:
             if (t.joinable()) t.join();
         }
     }
-    // 提交任务，生产者
-    void submit(std::function<void()>&& func) {
-        // 加入任务
-        tasks_.push(std::move(func));
+    // Args 是可变模板参数
+    template <typename F, typename... Args>
+    auto submit(F&& f, Args&&... args) -> std::future<std::invoke_result_t<F, Args...>>{
+        using return_type = std::invoke_result_t<F, Args ...>; // 类型推断
+        // 用智能指针指向 packaged_task 对象，bind 将可调用对象和参数绑定起来
+        auto task = std::make_shared<std::packaged_task<return_type()>>(
+            std::bind(std::forward<F>(f), std::forward<Args>(args)...)
+        );
+        // 获取 future 对象，用于后续返回值的获取
+        std::future<return_type> res = task->get_future();
+        // 用 lambda 函数擦除原可调用对象的参数和返回值
+        tasks_.push([task](){ (*task)(); });
+        return res;
     }
 };
